@@ -1,0 +1,14 @@
+node_modules/
+dist/
+.env
+*.log
+backend/data/*.sqlite
+backend/data/*.sqlite-shm
+backend/data/*.sqlite-wal
+release/
+stock-platform-share/
+*.zip
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
