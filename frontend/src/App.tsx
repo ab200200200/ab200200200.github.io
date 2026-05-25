@@ -9,7 +9,7 @@ import { StockHeader } from "./components/StockHeader";
 import { StockSearch } from "./components/StockSearch";
 import { TechnicalPanel } from "./components/TechnicalPanel";
 import { VolumePanel } from "./components/VolumePanel";
-import { useStockDashboard, useStockSummary } from "./hooks/useStockDashboard";
+import { useStockDashboard } from "./hooks/useStockDashboard";
 import { aggregateCandles, limitVisibleCandles, type KPeriod } from "./utils/chartData";
 
 type RecentSearchItem = {
@@ -48,11 +48,10 @@ export default function App() {
   const [stockId, setStockId] = useState("2330");
   const [kPeriod, setKPeriod] = useState<KPeriod>("daily");
   const [recentSearches, setRecentSearches] = useState<RecentSearchItem[]>(() => loadRecentSearches());
-  const stockQuery = useStockSummary(stockId);
-  const [technicalQuery, institutionalQuery, majorHoldersQuery] = useStockDashboard(stockId);
+  const dashboardQuery = useStockDashboard(stockId);
 
   useEffect(() => {
-    const stock = stockQuery.data;
+    const stock = dashboardQuery.data?.stock;
     if (!stock) return;
 
     const symbol = stock.symbol?.trim() || stock.id.trim().toUpperCase();
@@ -62,30 +61,23 @@ export default function App() {
       saveRecentSearches(merged);
       return merged;
     });
-  }, [stockQuery.data]);
+  }, [dashboardQuery.data]);
 
-  const firstError = useMemo(
-    () =>
-      stockQuery.error ??
-      technicalQuery.error ??
-      institutionalQuery.error ??
-      majorHoldersQuery.error,
-    [institutionalQuery.error, majorHoldersQuery.error, stockQuery.error, technicalQuery.error]
-  );
+  const firstError = useMemo(() => dashboardQuery.error, [dashboardQuery.error]);
 
   const dataWarnings = useMemo(
     () => [
-      ...(stockQuery.data?.warnings ?? []),
-      ...(technicalQuery.data?.warnings ?? []),
-      ...(institutionalQuery.data?.warnings ?? []),
-      ...(majorHoldersQuery.data?.warnings ?? [])
+      ...(dashboardQuery.data?.stock.warnings ?? []),
+      ...(dashboardQuery.data?.technical.warnings ?? []),
+      ...(dashboardQuery.data?.institutional.warnings ?? []),
+      ...(dashboardQuery.data?.majorHolders.warnings ?? [])
     ],
-    [institutionalQuery.data, majorHoldersQuery.data, stockQuery.data, technicalQuery.data]
+    [dashboardQuery.data]
   );
 
   const periodCandles = useMemo(
-    () => aggregateCandles(stockQuery.data?.candles ?? [], kPeriod),
-    [kPeriod, stockQuery.data?.candles]
+    () => aggregateCandles(dashboardQuery.data?.stock.candles ?? [], kPeriod),
+    [dashboardQuery.data?.stock.candles, kPeriod]
   );
   const visibleCandles = useMemo(() => limitVisibleCandles(periodCandles, 80), [periodCandles]);
   const chartSourceCandles = useMemo(() => limitVisibleCandles(periodCandles, 180), [periodCandles]);
@@ -103,7 +95,7 @@ export default function App() {
               <h1 className="text-2xl font-bold text-white">台股技術分析平台</h1>
             </div>
           </div>
-          {(technicalQuery.isFetching || institutionalQuery.isFetching || majorHoldersQuery.isFetching) && (
+          {dashboardQuery.isFetching && (
             <InlineLoading label="更新資料中" />
           )}
         </div>
@@ -112,11 +104,11 @@ export default function App() {
 
       {firstError ? <ErrorState message={getErrorMessage(firstError)} /> : null}
 
-      {stockQuery.isLoading ? (
+      {dashboardQuery.isLoading ? (
         <LoadingState />
-      ) : stockQuery.data ? (
+      ) : dashboardQuery.data ? (
         <>
-          <StockHeader stock={stockQuery.data} />
+          <StockHeader stock={dashboardQuery.data.stock} />
           <DataWarnings warnings={dataWarnings} />
 
           <section className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_360px]">
@@ -124,18 +116,18 @@ export default function App() {
               <CandlestickChart
                 candles={visibleCandles}
                 sourceCandles={chartSourceCandles}
-                stock={stockQuery.data}
+                stock={dashboardQuery.data.stock}
                 period={kPeriod}
-                institutional={institutionalQuery.data}
-                majorHolders={majorHoldersQuery.data}
+                institutional={dashboardQuery.data.institutional}
+                majorHolders={dashboardQuery.data.majorHolders}
                 onPeriodChange={setKPeriod}
               />
             </div>
             <div className="grid content-start gap-4 md:grid-cols-2 xl:grid-cols-1">
-              <TechnicalPanel technical={technicalQuery.data} />
-              <VolumePanel technical={technicalQuery.data} latestDate={stockQuery.data.dataQuality.latestDate} />
-              <InstitutionalPanel data={institutionalQuery.data} />
-              <MajorHoldersPanel data={majorHoldersQuery.data} />
+              <TechnicalPanel technical={dashboardQuery.data.technical} />
+              <VolumePanel technical={dashboardQuery.data.technical} latestDate={dashboardQuery.data.stock.dataQuality.latestDate} />
+              <InstitutionalPanel data={dashboardQuery.data.institutional} />
+              <MajorHoldersPanel data={dashboardQuery.data.majorHolders} />
             </div>
           </section>
         </>

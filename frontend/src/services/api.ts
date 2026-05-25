@@ -1,5 +1,6 @@
 import axios from "axios";
 import type {
+  DashboardResponse,
   InstitutionalResponse,
   MajorHoldersResponse,
   StockSummary,
@@ -28,5 +29,10 @@ export async function getInstitutional(id: string): Promise<InstitutionalRespons
 
 export async function getMajorHolders(id: string): Promise<MajorHoldersResponse> {
   const response = await api.get<MajorHoldersResponse>(`/majorholders/${id}`);
+  return response.data;
+}
+
+export async function getDashboard(id: string): Promise<DashboardResponse> {
+  const response = await api.get<DashboardResponse>(`/dashboard/${id}`);
   return response.data;
 }

@@ -103,3 +103,12 @@ export type MajorHoldersResponse = {
   };
   warnings: string[];
 };
+
+export type DashboardResponse = {
+  id: string;
+  stock: StockSummary;
+  technical: TechnicalResponse;
+  institutional: InstitutionalResponse;
+  majorHolders: MajorHoldersResponse;
+  fetchedAt: string;
+};

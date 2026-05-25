@@ -4,6 +4,7 @@ import { withCache } from "../services/cache.js";
 import { fetchMajorHolders } from "../services/tdcc.js";
 import { fetchInstitutional } from "../services/twse.js";
 import { fetchOpenApiStockSummary } from "../services/twseOpenApi.js";
+import type { DashboardResponse } from "../types.js";
 
 export const apiRouter = Router();
 
@@ -35,6 +36,40 @@ apiRouter.get("/technical/:id", async (req, res, next) => {
       async () => buildTechnicalResponse(id, stock.candles)
     );
     res.json(technical);
+  } catch (error) {
+    next(error);
+  }
+});
+
+apiRouter.get("/dashboard/:id", async (req, res, next) => {
+  try {
+    const id = validateStockId(req.params.id);
+    const normalizedId = id.replace(/\.(TW|TWO)$/u, "");
+    const stock = await fetchOpenApiStockSummary(id);
+    const latestDate = stock.candles.at(-1)?.time ?? "none";
+
+    const dashboard = await withCache<DashboardResponse>(
+      `dashboard:v1:${id}:${latestDate}:${stock.candles.length}`,
+      30,
+      async () => {
+        const technical = buildTechnicalResponse(id, stock.candles);
+        const [institutional, majorHolders] = await Promise.all([
+          fetchInstitutional(normalizedId),
+          fetchMajorHolders(normalizedId)
+        ]);
+
+        return {
+          id: normalizedId,
+          stock,
+          technical,
+          institutional,
+          majorHolders,
+          fetchedAt: new Date().toISOString()
+        };
+      }
+    );
+
+    res.json(dashboard);
   } catch (error) {
     next(error);
   }
