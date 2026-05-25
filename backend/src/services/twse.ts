@@ -1,4 +1,5 @@
 import type { InstitutionalRecord, InstitutionalResponse } from "../types.js";
+import { loadInstitutional, upsertInstitutional } from "./marketDataStore.js";
 import { parseNumber } from "../utils/number.js";
 import { withCache } from "./cache.js";
 import { http } from "./http.js";
@@ -24,6 +25,10 @@ type FinMindInstitutionalRow = {
 
 type FinMindResponse<T> = {
   data?: T[];
+};
+
+type FetchInstitutionalOptions = {
+  preferDatabase?: boolean;
 };
 
 type DateResult = InstitutionalRecord | null;
@@ -61,13 +66,13 @@ function findIndex(fields: string[], patterns: string[]): number {
 }
 
 function findCodeIndex(fields: string[]): number {
-  const index = findIndex(fields, ["證券代號", "代號", "股票代號", "Code"]);
+  const index = findIndex(fields, ["證券代號", "股票代號", "代號", "Code"]);
   return index >= 0 ? index : 0;
 }
 
 function pickByField(fields: string[], row: string[], patterns: string[]): number | null {
   const index = findIndex(fields, patterns);
-  return index >= 0 ? parseNumber(row[index]) : null;
+  return index >= 0 ? parseNumber(row[index] ?? "0") : null;
 }
 
 function parseTwseT86(stockId: string, date: string, payload: TwseT86Response): DateResult {
@@ -78,8 +83,7 @@ function parseTwseT86(stockId: string, date: string, payload: TwseT86Response): 
   if (!row) return null;
 
   const foreignInvestor =
-    pickByField(fields, row, ["外陸資買賣超股數(不含外資自營商)", "外資及陸資買賣超股數", "外資買賣超股數"]) ??
-    0;
+    pickByField(fields, row, ["外陸資買賣超股數(不含外資自營商)", "外資及陸資買賣超股數", "外資買賣超股數"]) ?? 0;
   const investmentTrust = pickByField(fields, row, ["投信買賣超股數", "投信買賣超"]) ?? 0;
   const dealer = pickByField(fields, row, ["自營商買賣超股數", "自營商買賣超"]) ?? 0;
 
@@ -102,14 +106,14 @@ function parseTpexDailyTrade(stockId: string, date: string, payload: TpexDailyTr
   if (!row) return null;
 
   const foreignInvestor = fields.length
-    ? pickByField(fields, row, ["外資及陸資淨買股數", "外資及陸資買賣超股數", "外資及陸資買賣超"]) ?? 0
-    : parseNumber(row[4]);
+    ? pickByField(fields, row, ["外資及陸資買賣超", "外資買賣超", "外資及陸資(不含外資自營商)買賣超股數"]) ?? 0
+    : parseNumber(row[4] ?? "0");
   const investmentTrust = fields.length
-    ? pickByField(fields, row, ["投信淨買股數", "投信買賣超股數", "投信買賣超"]) ?? 0
-    : parseNumber(row[7]);
+    ? pickByField(fields, row, ["投信買賣超", "投信買賣超股數"]) ?? 0
+    : parseNumber(row[7] ?? "0");
   const dealer = fields.length
-    ? pickByField(fields, row, ["自營商淨買股數", "自營商買賣超股數", "自營商買賣超"]) ?? 0
-    : parseNumber(row[10]);
+    ? pickByField(fields, row, ["自營商買賣超", "自營商買賣超股數"]) ?? 0
+    : parseNumber(row[10] ?? "0");
 
   return {
     date: displayDate(date),
@@ -131,6 +135,7 @@ function parseFinMindInstitutional(stockId: string, rows: FinMindInstitutionalRo
 
   for (const row of rows) {
     if (row.stock_id !== stockId) continue;
+
     const normalizedDate = String(row.date).slice(0, 10);
     const existing = byDate.get(normalizedDate) ?? {
       date: normalizedDate,
@@ -139,8 +144,8 @@ function parseFinMindInstitutional(stockId: string, rows: FinMindInstitutionalRo
       dealer: 0,
       total: 0
     };
-    const net = parseNumber(row.buy) - parseNumber(row.sell);
 
+    const net = parseNumber(row.buy) - parseNumber(row.sell);
     if (row.name === "Foreign_Investor") existing.foreignInvestor += net;
     if (row.name === "Investment_Trust") existing.investmentTrust += net;
     if (row.name === "Dealer_self" || row.name === "Dealer_Hedging" || row.name === "Foreign_Dealer_Self") {
@@ -151,26 +156,25 @@ function parseFinMindInstitutional(stockId: string, rows: FinMindInstitutionalRo
     byDate.set(normalizedDate, existing);
   }
 
-  return [...byDate.values()].sort((a, b) => b.date.localeCompare(a.date));
+  return [...byDate.values()].sort((left, right) => right.date.localeCompare(left.date));
 }
 
 async function fetchFinMindInstitutional(stockId: string): Promise<InstitutionalRecord[]> {
   const response = await http.get<FinMindResponse<FinMindInstitutionalRow>>(FINMIND_DATA_URL, {
-    timeout: 8000,
+    timeout: 9_000,
     params: {
       dataset: "TaiwanStockInstitutionalInvestorsBuySell",
       data_id: stockId,
       start_date: toDateFloorString(420)
     }
   });
-
   return parseFinMindInstitutional(stockId, response.data.data ?? []);
 }
 
 async function fetchTwseByDate(stockId: string, date: string): Promise<DateResult> {
   try {
     const response = await http.get<TwseT86Response>(TWSE_T86_URL, {
-      timeout: 3500,
+      timeout: 4_500,
       params: {
         response: "json",
         date,
@@ -186,7 +190,7 @@ async function fetchTwseByDate(stockId: string, date: string): Promise<DateResul
 async function fetchTpexByDate(stockId: string, date: string): Promise<DateResult> {
   try {
     const response = await http.get<TpexDailyTradeResponse>(TPEX_DAILY_TRADE_URL, {
-      timeout: 3500,
+      timeout: 4_500,
       params: {
         l: "zh-tw",
         o: "json",
@@ -203,7 +207,7 @@ async function fetchTpexByDate(stockId: string, date: string): Promise<DateResul
 }
 
 async function fetchInstitutionalByDate(stockId: string, date: string): Promise<DateResult> {
-  return withCache(`institutional:twse-tpex-date:v2:${stockId}:${date}`, 60 * 60 * 12, async () => {
+  return withCache(`institutional:date:v1:${stockId}:${date}`, 60 * 60 * 12, async () => {
     const [twse, tpex] = await Promise.all([fetchTwseByDate(stockId, date), fetchTpexByDate(stockId, date)]);
     return twse ?? tpex;
   });
@@ -243,9 +247,7 @@ async function mapWithConcurrency<T, R>(
 }
 
 function calculateStreak(records: InstitutionalRecord[]): InstitutionalResponse["streak"] {
-  const latestDirection =
-    (records[0]?.total ?? 0) > 0 ? "buy" : (records[0]?.total ?? 0) < 0 ? "sell" : "flat";
-
+  const latestDirection = records[0]?.total > 0 ? "buy" : records[0]?.total < 0 ? "sell" : "flat";
   if (latestDirection === "flat") {
     return { buyDays: 0, sellDays: 0, direction: "flat" };
   }
@@ -264,22 +266,56 @@ function calculateStreak(records: InstitutionalRecord[]): InstitutionalResponse[
   };
 }
 
-export async function fetchInstitutional(stockId: string): Promise<InstitutionalResponse> {
-  const normalizedId = stockId.trim().toUpperCase().replace(/\.(TW|TWO)$/u, "");
-  return withCache(`institutional:finmind-twse-tpex:v1:${normalizedId}`, 60 * 30, async () => {
-    let records: InstitutionalRecord[] = [];
+async function loadFromDatabase(symbol: string): Promise<InstitutionalRecord[]> {
+  const dbRecords = await loadInstitutional(symbol, 200);
+  return dbRecords
+    .map((record) => ({
+      date: record.date,
+      foreignInvestor: record.foreignInvestor,
+      investmentTrust: record.investmentTrust,
+      dealer: 0,
+      total: record.foreignInvestor + record.investmentTrust
+    }))
+    .sort((left, right) => right.date.localeCompare(left.date));
+}
 
+export async function fetchInstitutional(
+  stockId: string,
+  options: FetchInstitutionalOptions = {}
+): Promise<InstitutionalResponse> {
+  const normalizedId = stockId.trim().toUpperCase().replace(/\.(TW|TWO)$/u, "");
+  const preferDatabase = options.preferDatabase !== false;
+
+  return withCache(`institutional:v2:${normalizedId}:${preferDatabase ? "db" : "remote"}`, 60 * 15, async () => {
+    if (preferDatabase) {
+      const fromDb = await loadFromDatabase(normalizedId);
+      if (fromDb.length >= 20) {
+        return {
+          id: normalizedId,
+          latest: fromDb[0] ?? null,
+          records: fromDb,
+          streak: calculateStreak(fromDb),
+          warnings: []
+        };
+      }
+    }
+
+    let records: InstitutionalRecord[] = [];
     try {
-      records = (await fetchFinMindInstitutional(normalizedId)).slice(0, 100);
+      records = (await fetchFinMindInstitutional(normalizedId)).slice(0, 140);
     } catch {
       records = [];
     }
 
     if (!records.length) {
-      const dates = recentWeekdayDates(115);
-      records = (await mapWithConcurrency(dates, 16, (date) => fetchInstitutionalByDate(normalizedId, date)))
+      const dates = recentWeekdayDates(120);
+      records = (await mapWithConcurrency(dates, 12, (date) => fetchInstitutionalByDate(normalizedId, date)))
         .filter((record): record is InstitutionalRecord => record !== null)
-        .slice(0, 90);
+        .slice(0, 100);
+    }
+
+    if (records.length) {
+      await Promise.allSettled([upsertInstitutional(normalizedId, records)]);
     }
 
     return {
@@ -287,7 +323,7 @@ export async function fetchInstitutional(stockId: string): Promise<Institutional
       latest: records[0] ?? null,
       records,
       streak: calculateStreak(records),
-      warnings: records.length ? [] : ["外資/投信資料來源沒有回傳可用紀錄（FinMind、TWSE、TPEx 皆失敗）。"]
+      warnings: records.length ? [] : ["外資/投信資料暫時抓不到，請稍後再試。"]
     };
   });
 }

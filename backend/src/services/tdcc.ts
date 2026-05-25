@@ -2,10 +2,15 @@ import type { MajorHolderRecord, MajorHoldersResponse } from "../types.js";
 import { parseNumber, round } from "../utils/number.js";
 import { withCache } from "./cache.js";
 import { http } from "./http.js";
+import { loadMajorHolders, upsertMajorHolders } from "./marketDataStore.js";
 
 const TDCC_QRY_STOCK_URL = "https://www.tdcc.com.tw/portal/zh/smWeb/qryStock";
 const TDCC_MAJOR_HOLDER_LEVEL = "1,000,001";
 const NORWAY_STOCK_HOLDERS_URL = "https://norway.twsthr.info/StockHolders.aspx";
+
+type FetchMajorHoldersOptions = {
+  preferDatabase?: boolean;
+};
 
 type TdccSession = {
   html: string;
@@ -66,17 +71,18 @@ function parseNorwayHolderRows(html: string): MajorHolderRecord[] {
       percentage: round(parseNumber(cells[13]), 2),
       shares: parseNumber(cells[3]),
       holders: parseNumber(cells[12])
-    }));
+    }))
+    .sort((left, right) => right.date.localeCompare(left.date));
 }
 
 async function fetchNorwayFallback(stockId: string): Promise<MajorHolderRecord[]> {
   const response = await http.get<string>(NORWAY_STOCK_HOLDERS_URL, {
-    timeout: 6000,
+    timeout: 8_000,
     params: { stock: stockId },
     responseType: "text",
     transformResponse: [(data) => data]
   });
-  return parseNorwayHolderRows(response.data).slice(0, 120);
+  return parseNorwayHolderRows(response.data).slice(0, 180);
 }
 
 function serializeCookies(setCookie: string[] | string | undefined): string {
@@ -87,7 +93,7 @@ function serializeCookies(setCookie: string[] | string | undefined): string {
 
 async function fetchTdccLandingPage(): Promise<TdccSession> {
   const response = await http.get<string>(TDCC_QRY_STOCK_URL, {
-    timeout: 6000,
+    timeout: 8_000,
     responseType: "text",
     transformResponse: [(data) => data]
   });
@@ -102,7 +108,7 @@ async function fetchTdccMajorHolderByDate(
   date: string,
   session: TdccSession
 ): Promise<MajorHolderRecord | null> {
-  return withCache(`tdcc:major-holders:v2:${stockId}:${date}`, 60 * 60 * 24, async () => {
+  return withCache(`tdcc:major-holders:v3:${stockId}:${date}`, 60 * 60 * 24, async () => {
     const form = new URLSearchParams({
       SYNCHRONIZER_TOKEN: extractInputValue(session.html, "SYNCHRONIZER_TOKEN"),
       SYNCHRONIZER_URI: "/portal/zh/smWeb/qryStock",
@@ -115,7 +121,7 @@ async function fetchTdccMajorHolderByDate(
     });
 
     const response = await http.post<string>(TDCC_QRY_STOCK_URL, form.toString(), {
-      timeout: 6000,
+      timeout: 8_000,
       responseType: "text",
       transformResponse: [(data) => data],
       headers: {
@@ -163,29 +169,67 @@ function calculateTrend(records: MajorHolderRecord[]): MajorHoldersResponse["tre
   };
 }
 
-export async function fetchMajorHolders(stockId: string): Promise<MajorHoldersResponse> {
+async function loadFromDatabase(symbol: string): Promise<MajorHolderRecord[]> {
+  const records = await loadMajorHolders(symbol, 220);
+  return records
+    .map((record) => ({
+      date: record.date,
+      percentage: record.percentage,
+      shares: record.shares,
+      holders: record.holders
+    }))
+    .sort((left, right) => right.date.localeCompare(left.date));
+}
+
+async function fetchFromRemote(symbol: string): Promise<MajorHolderRecord[]> {
+  let records: MajorHolderRecord[] = [];
+
+  try {
+    const session = await fetchTdccLandingPage();
+    const dates = extractAvailableDates(session.html).slice(0, 100);
+    if (dates.length) {
+      records = (await mapWithConcurrency(dates, 14, (date) => fetchTdccMajorHolderByDate(symbol, date, session))).filter(
+        (record): record is MajorHolderRecord => record !== null
+      );
+    }
+  } catch {
+    records = [];
+  }
+
+  if (records.length < 8) {
+    records = await fetchNorwayFallback(symbol);
+  }
+
+  return records.sort((left, right) => right.date.localeCompare(left.date));
+}
+
+export async function fetchMajorHolders(
+  stockId: string,
+  options: FetchMajorHoldersOptions = {}
+): Promise<MajorHoldersResponse> {
   const normalizedId = stockId.trim().toUpperCase().replace(/\.(TW|TWO)$/u, "");
-  return withCache(`major-holders:tdcc-or-norway:v3:${normalizedId}`, 60 * 60 * 6, async () => {
-    let records: MajorHolderRecord[] = [];
+  const preferDatabase = options.preferDatabase !== false;
 
-    try {
-      const session = await fetchTdccLandingPage();
-      const dates = extractAvailableDates(session.html).slice(0, 80);
-      if (dates.length) {
-        records = (await mapWithConcurrency(dates, 16, (date) => fetchTdccMajorHolderByDate(normalizedId, date, session)))
-          .filter((record): record is MajorHolderRecord => record !== null);
+  return withCache(`major-holders:v4:${normalizedId}:${preferDatabase ? "db" : "remote"}`, 60 * 30, async () => {
+    if (preferDatabase) {
+      const fromDb = await loadFromDatabase(normalizedId);
+      if (fromDb.length >= 8) {
+        return {
+          id: normalizedId,
+          latest: fromDb[0] ?? null,
+          records: fromDb,
+          trend: calculateTrend(fromDb),
+          warnings: []
+        };
       }
-    } catch {
-      records = [];
     }
 
-    if (records.length < 8) {
-      records = await fetchNorwayFallback(normalizedId);
-    }
-
+    const records = await fetchFromRemote(normalizedId);
     if (!records.length) {
-      throw new Error(`TDCC 與備援來源都找不到 ${normalizedId} 的千張大戶資料。`);
+      throw new Error(`TDCC/備援來源目前抓不到 ${normalizedId} 的千張大戶資料。`);
     }
+
+    await Promise.allSettled([upsertMajorHolders(normalizedId, records)]);
 
     return {
       id: normalizedId,
